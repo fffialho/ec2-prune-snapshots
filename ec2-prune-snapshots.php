@@ -116,7 +116,7 @@ if (isset($options['f'])) {
   $defaultSettings['awsConfigFile'] = $options['f'];
 }
 if (!is_readable($defaultSettings['awsConfigFile'])) {
-  die("ERROR: File $defaultSettings['awsConfigFile'] does not exists or is unreadable.");
+  die("ERROR: File ".$defaultSettings['awsConfigFile']." does not exists or is unreadable.");
 }
 define('NOOP',!isset($options['d']));
 if (isset($options['a'])) {
