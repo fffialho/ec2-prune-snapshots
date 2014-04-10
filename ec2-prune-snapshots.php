@@ -1,7 +1,7 @@
 <?php
 define('VERSION','0.3');
 $defaultSettings = array(
-  "awsConfigFile"=>"aws-config.php",
+  "awsConfigFile"=>"aws-config.json",
   "quiet"=>0,
   "verbose"=>0,
   "clearAllBefore"=>18*30,  // 18 months, roughly
@@ -47,36 +47,34 @@ function keepSnapShot($ts, $lastSavedTs, $settings) {
   $verbose = $settings['verbose'];
   $quiet = $settings['quiet'];
 
-  $logDate = "\t".date('M d, Y',$ts)."\t";
-
   $isDailyDupe = $lastSavedTs > 1000000000
     && date('Y-m-d',$ts) == date('Y-m-d',$lastSavedTs);
   $isSunday = intval(date("w", $ts)) == 0;
   $is1st = intval(date("d", $ts)) == 1;
 
   if ($ts >= $saveAfter) {
-    if ($verbose) echo "{$logDate}Very recent\tKEEP\n";
+    if ($verbose) echo "Very recent\tKEEP\n";
     return TRUE;
   } else if ($ts >= $oncePerDayAfter && !$isDailyDupe) {
-    if ($verbose) echo "{$logDate}Recent backup\tKEEP\n";
+    if ($verbose) echo "Recent backup\tKEEP\n";
     return TRUE;
   } else if ($ts >= $clearNotSunAfter && $isSunday && !$isDailyDupe) {
-    if ($verbose) echo "{$logDate}Recent Sunday\tKEEP\n";
+    if ($verbose) echo "Recent Sunday\tKEEP\n";
     return TRUE;
   } else if ($ts >= $clearNot1stAfter && $is1st && !$isDailyDupe) {
-    if ($verbose) echo "{$logDate}1st of month\tKEEP\n" ;
+    if ($verbose) echo "1st of month\tKEEP\n" ;
     return TRUE;
   } else {
     if ($isDailyDupe) {
-      if (!$quiet) echo "{$logDate}Daily dupe\tDELETE\n";
+      if (!$quiet) echo "Daily dupe\tDELETE\n";
     } else if ($ts < $clearNot1stAfter) {
-      if (!$quiet) echo "{$logDate}Ancient backup\tDELETE\n";
+      if (!$quiet) echo "Ancient backup\tDELETE\n";
     } else if (!$isSunday && !$is1st) {
-      if (!$quiet) echo "{$logDate}Old backup\tDELETE\n";
+      if (!$quiet) echo "Old backup\tDELETE\n";
     } else if ($isSunday && !$is1st) {
-      if (!$quiet) echo "{$logDate}Old Sunday\tDELETE\n";
+      if (!$quiet) echo "Old Sunday\tDELETE\n";
     } else {
-      echo "{$logDate}UNKNOWN!!\n";
+      echo "UNKNOWN!!\n";
       die("ERROR: Not sure on reason for deletion?!\n");
     }
     return FALSE;
@@ -88,7 +86,6 @@ if (isset($options['h'])) {
   echo "ec2-prune-snapshots v".VERSION." by Benjie Gillam\n";
   echo "\n";
   echo "This script defaults to no action - specify -d to perform operations.\n";
-  echo "Be sure to set your credentials in ~/.aws/sdk/config.inc.php as specified by the AWS SDK. See: https://aws.amazon.com/articles/4261#configurecredentials\n";
   echo "\n";
   echo "Usage:\n";
   echo "\t-h\t\tHelp\n";
@@ -171,7 +168,7 @@ try {
   $response = $ec2->describeSnapshots(array('OwnerIds' => array('self')))->toArray();
 }
 catch (\Aws\Ec2\Exception\Ec2Exception $e) {
-  echo "$e->getMessage()\n";
+  echo $e->getMessage()."\n";
   die('REQUEST FAILED');
 }
 
@@ -188,7 +185,7 @@ foreach ($response['Snapshots'] as $item) {
   $snapshotDates[$volId][count($snapshots[$volId])-1] = strtotime($item['StartTime']);
 }
 foreach ($snapshots as $volId => &$snaps) {
-  if ($defaultSettings['verbose']>1) echo "Sorting '$volId' (".count($snaps).")\n";
+  if ($defaultSettings['verbose'] > 1) echo "Sorting '$volId' (".count($snaps).")\n";
   array_multisort($snapshotDates[$volId],SORT_DESC,$snaps);
   $snapshots[$volId] = $snaps;
 }
@@ -197,6 +194,9 @@ ksort($snapshots);
 
 $totalDeleted = 0;
 $totalRemaining = 0;
+
+$quiet = $defaultSettings['quiet'];
+
 foreach ($snapshots as $volId => &$snaps) {
   $settings = $defaultSettings;
   if (!empty($volumeSettings[$volId])) {
@@ -210,13 +210,13 @@ foreach ($snapshots as $volId => &$snaps) {
   $remaining = 0;
   $saved = array_shift($snaps);
   $remaining++;
-  if ($settings['verbose']) echo "\n[DEBUG] Description { ".$saved['Description']." }\n";
-  if ($settings['verbose']) echo "\t".date("M d, Y",strtotime($saved['StartTime']))."\tFORCE SAVE\tKEEP\n";
+  if ($settings['verbose']) echo "\t".$saved['SnapshotId']."\t".date("M d, Y",strtotime($saved['StartTime']))."\tFORCE SAVE\tKEEP\n";
+  if ($settings['verbose'] > 1) echo "\t    |->".$saved['Description']."\n\n";
   $lastSavedSnapshotTs = null;
   foreach ($snaps as $snap) {
     $t = strtotime($snap['StartTime']);
-    if ($settings['verbose'] > 1) echo "\n[DEBUG] Description { ".$snap['Description']." }\n";
     if ($t > 1000000000) {
+      if (!$quiet) echo "\t".$snap['SnapshotId']."\t".date("M d, Y",strtotime($snap['StartTime']))."\t";
       if (!keepSnapshot($t,$lastSavedSnapshotTs,$settings)) {
         $deleted++;
         if (!NOOP) {
@@ -225,10 +225,13 @@ foreach ($snapshots as $volId => &$snaps) {
           }
           catch (\Aws\Ec2\Exception\Ec2Exception $e) {
             //echo $e->__toString();
-            echo $e->getMessage();
-            if (strstr($e->getExceptionCode(),'InvalidSnapshot.InUse') === FALSE) {
-              die("Deletion of '{$snap['SnapshotId']}' failed\n");
+            echo "\t    |->".$e->getMessage()."\n\n";
+            if (strstr($e->getExceptionCode(),'InvalidSnapshot.InUse')) {
+              $deleted--;
+              $remaining++;
+              continue;
             }
+            die("Deletion of '{$snap['SnapshotId']}' failed\n");
           }
         } else {
           if ($settings['verbose'] > 1) echo "[NOOP]\tDelete '{$snap['SnapshotId']}' ({$snap['VolumeId']})\n";
@@ -237,6 +240,7 @@ foreach ($snapshots as $volId => &$snaps) {
         $remaining++;
         $lastSavedSnapshotTs = $t;
       }
+      if ($settings['verbose'] > 1) echo "\t    |->".$snap['Description']."\n\n";
     } else {
       die('SNAPSHOT TOO OLD!!');
     }
