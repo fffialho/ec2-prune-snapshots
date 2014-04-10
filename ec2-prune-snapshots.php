@@ -1,6 +1,7 @@
 <?php
-define('VERSION','0.2');
+define('VERSION','0.3');
 $defaultSettings = array(
+  "awsConfigFile"=>"aws-config.php",
   "quiet"=>0,
   "verbose"=>0,
   "clearAllBefore"=>18*30,  // 18 months, roughly
@@ -82,7 +83,7 @@ function keepSnapShot($ts, $lastSavedTs, $settings) {
   }
 }
 
-$options = getopt("vqa:V:dh");
+$options = getopt("f::vqa:V:dh");
 if (isset($options['h'])) {
   echo "ec2-prune-snapshots v".VERSION." by Benjie Gillam\n";
   echo "\n";
@@ -91,11 +92,12 @@ if (isset($options['h'])) {
   echo "\n";
   echo "Usage:\n";
   echo "\t-h\t\tHelp\n";
+  echo "\t-f\t\tFile for aws-sdk configuration\n";
   echo "\t-v\t\tVerbose (specify multiple times for greater verbosity)\n";
   echo "\t-q\t\tQuiet\n";
   echo "\t-d\t\tActually perform operations (delete/do it)\n";
   echo "\t-a365:30:7:3\tSet global options\n";
-  echo "\t-v'vol-abcdefgh:365:30:7:3'\tSet options for specific volume\n";
+  echo "\t-V'vol-abcdefgh:365:30:7:3'\tSet options for specific volume\n";
   echo "\n";
   echo "Options are specified as 4 ages, in days, for each operation\n";
   echo "\t1st: delete all older snapshots\n";
@@ -108,6 +110,14 @@ if (isset($options['h'])) {
 }
 $defaultSettings['quiet'] = optcount($options,'q');
 $defaultSettings['verbose'] = optcount($options,'v');
+
+
+if (isset($options['f'])) {
+  $defaultSettings['awsConfigFile'] = $options['f'];
+}
+if (!is_readable($defaultSettings['awsConfigFile'])) {
+  die("ERROR: File $defaultSettings['awsConfigFile'] does not exists or is unreadable.");
+}
 define('NOOP',!isset($options['d']));
 if (isset($options['a'])) {
   if (is_array($options['a'])) {
@@ -146,29 +156,36 @@ if (isset($options['V'])) {
     $volumeSettings[$vol] = $settings;
   }
 }
-require(dirname(__FILE__).'/sdk/sdk.class.php');
+
+require(dirname(__FILE__).'/vendor/autoload.php');
+
+use Aws\Common\Aws;
+$aws = Aws::factory($defaultSettings['awsConfigFile']);
 
 if (NOOP) {
   echo "WARNING: NOTHING WILL BE DELETED. Run this command again with -d (do it!) to actually perform the operations.\n";
 }
 
-$ec2 = new AmazonEC2();
-$response = $ec2->describe_snapshots(array('Owner' => 'self'));
-if (!$response->isOK()) {
+$ec2 = $aws->get('ec2');
+try {
+  $response = $ec2->describeSnapshots(array('OwnerIds' => array('self')))->toArray();
+}
+catch (\Aws\Ec2\Exception\Ec2Exception $e) {
+  echo "$e->getMessage()\n";
   die('REQUEST FAILED');
 }
 
 $snapshots = array();
 $snapshotDates = array();
-foreach ($response->body->snapshotSet->item as $item) {
+foreach ($response['Snapshots'] as $item) {
   $item = (array)$item;
-  if ($item['status'] != "completed") {
-    echo "{$item['snapshotId']} incomplete\n";
+  if ($item['State'] != "completed") {
+    echo "{$item['SnapshotId']} incomplete\n";
     continue;
   }
-  $volId = $item['volumeId']."";
+  $volId = $item['VolumeId']."";
   $snapshots[$volId][] = $item;
-  $snapshotDates[$volId][count($snapshots[$volId])-1] = strtotime($item['startTime']);
+  $snapshotDates[$volId][count($snapshots[$volId])-1] = strtotime($item['StartTime']);
 }
 foreach ($snapshots as $volId => &$snaps) {
   if ($defaultSettings['verbose']>1) echo "Sorting '$volId' (".count($snaps).")\n";
@@ -193,20 +210,28 @@ foreach ($snapshots as $volId => &$snaps) {
   $remaining = 0;
   $saved = array_shift($snaps);
   $remaining++;
-  if ($settings['verbose']) echo "\t".date("M d, Y",strtotime($saved['startTime']))."\tFORCE SAVE\tKEEP\n";
+  if ($settings['verbose']) echo "\n[DEBUG] Description { ".$saved['Description']." }\n";
+  if ($settings['verbose']) echo "\t".date("M d, Y",strtotime($saved['StartTime']))."\tFORCE SAVE\tKEEP\n";
   $lastSavedSnapshotTs = null;
   foreach ($snaps as $snap) {
-    $t = strtotime($snap['startTime']);
+    $t = strtotime($snap['StartTime']);
+    if ($settings['verbose'] > 1) echo "\n[DEBUG] Description { ".$snap['Description']." }\n";
     if ($t > 1000000000) {
       if (!keepSnapshot($t,$lastSavedSnapshotTs,$settings)) {
         $deleted++;
         if (!NOOP) {
-          $response = $ec2->delete_snapshot($snap['snapshotId']);
-          if (!$response->isOK()) {
-            die("Deletion of '{$snap['snapshotId']}' failed\n");
+          try {
+            $response = $ec2->deleteSnapshot(array('SnapshotId'=>$snap['SnapshotId']));
+          }
+          catch (\Aws\Ec2\Exception\Ec2Exception $e) {
+            //echo $e->__toString();
+            echo $e->getMessage();
+            if (strstr($e->getExceptionCode(),'InvalidSnapshot.InUse') === FALSE) {
+              die("Deletion of '{$snap['SnapshotId']}' failed\n");
+            }
           }
         } else {
-          if ($settings['verbose'] > 1) echo "[NOOP]\tDelete '{$snap['snapshotId']}' ({$snap['volumeId']})\n";
+          if ($settings['verbose'] > 1) echo "[NOOP]\tDelete '{$snap['SnapshotId']}' ({$snap['VolumeId']})\n";
         }
       } else {
         $remaining++;
